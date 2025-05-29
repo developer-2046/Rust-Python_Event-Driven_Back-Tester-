@@ -1,4 +1,4 @@
-use crate::data::Tick;             
+use crate::data::Tick;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -13,12 +13,14 @@ pub struct SignalEvent {
     pub ts: chrono::DateTime<chrono::Utc>,
     pub long: bool,
 }
+
 #[derive(Debug, Clone)]
 pub struct OrderEvent {
     pub ts: chrono::DateTime<chrono::Utc>,
     pub long: bool,
     pub size: i32,
 }
+
 #[derive(Debug, Clone)]
 pub struct FillEvent {
     pub ts: chrono::DateTime<chrono::Utc>,

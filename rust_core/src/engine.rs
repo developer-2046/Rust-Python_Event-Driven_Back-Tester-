@@ -1,38 +1,40 @@
-use crate::events::{Event, OrderEvent, FillEvent};
 use crate::data::Tick;
+use crate::events::{Event, FillEvent, OrderEvent};
 use crate::strategy::SmaCross;
 use anyhow::Result;
 use std::collections::VecDeque;
+
+const ES_MULT: f64 = 50.0;
+const ROLL: usize = 2_000;        // rolling Sharpe window
 
 pub struct Engine {
     queue: VecDeque<Event>,
     strategy: SmaCross,
     equity: f64,
     position: i32,
-    equity_curve: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
-    
+    equity_curve: Vec<(chrono::DateTime<chrono::Utc>, f64, f64)>,
+    rolling_buf: Vec<f64>,
 }
 
 impl Engine {
-    pub fn new(fast: usize, slow: usize, equity: f64) -> Self {
+    pub fn new(fast: usize, slow: usize, start_cash: f64) -> Self {
         Self {
             queue: VecDeque::new(),
             strategy: SmaCross::new(fast, slow),
-            equity,
+            equity: start_cash,
             position: 0,
             equity_curve: Vec::new(),
+            rolling_buf: Vec::with_capacity(ROLL + 1),
         }
     }
 
-    // ========================================== core loop
     pub fn run(&mut self, ticks: Vec<Tick>) -> Result<()> {
         for tick in ticks {
             self.queue.push_back(Event::Market(tick.clone()));
-
             while let Some(ev) = self.queue.pop_front() {
                 match ev {
                     Event::Market(t) => self.handle_market(t),
-                    Event::Signal(s) => self.handle_signal(s, tick.price),
+                    Event::Signal(s) => self.handle_signal(s),
                     Event::Order(o)  => self.handle_order(o, tick.price),
                     Event::Fill(f)   => self.handle_fill(f),
                 }
@@ -41,16 +43,15 @@ impl Engine {
         Ok(())
     }
 
-    // -------------- handlers --------------
     fn handle_market(&mut self, tick: Tick) {
         if let Some(sig) = self.strategy.on_tick(&tick) {
             self.queue.push_back(sig);
         }
-        let mv = self.position as f64 * tick.price * 50.0; // ES multiplier
-        self.equity_curve.push((tick.ts, self.equity + mv));
+        let mv = self.position as f64 * tick.price * ES_MULT;
+        self.push_equity(tick.ts, self.equity + mv);
     }
 
-    fn handle_signal(&mut self, sig: crate::events::SignalEvent, price: f64) {
+    fn handle_signal(&mut self, sig: crate::events::SignalEvent) {
         let desired = if sig.long { 1 } else { 0 };
         let diff = desired - self.position;
         if diff != 0 {
@@ -73,29 +74,44 @@ impl Engine {
     }
 
     fn handle_fill(&mut self, fill: FillEvent) {
-        let signed = if fill.long { 1 } else { -1 };
-        self.position += signed * fill.size;
-        self.equity -= signed as f64 * fill.size as f64 * fill.price * 50.0;
+        let sign = if fill.long { 1 } else { -1 };
+        self.position += sign * fill.size;
+        self.equity -= sign as f64 * fill.size as f64 * fill.price * ES_MULT;
         self.equity -= fill.commission;
     }
 
-    // -------------- output --------------
-pub fn equity_df(&self) -> polars::prelude::DataFrame {
-    use polars::prelude::*;
-    let ts_i64 : Vec<i64> = self.equity_curve
-        .iter()
-        .map(|(t, _)| t.timestamp_millis())
-        .collect();
-    let eq_vec : Vec<f64> = self.equity_curve
-        .iter()
-        .map(|(_, e)| *e)
-        .collect();
-    
-    let ts_series = Series::new("timestamp", ts_i64);
-    let eq_series = Series::new("equity",    eq_vec);
-    let df = DataFrame::new(vec![ts_series, eq_series]).unwrap();
+    fn push_equity(&mut self, ts: chrono::DateTime<chrono::Utc>, eq: f64) {
+        if let Some(_) = self.rolling_buf.last() {
+            self.rolling_buf.push(eq);
+            if self.rolling_buf.len() > ROLL + 1 {
+                self.rolling_buf.remove(0);
+            }
+        } else {
+            self.rolling_buf.push(eq);
+        }
 
+        let sharpe = if self.rolling_buf.len() > 2 {
+            let rets: Vec<f64> = self
+                .rolling_buf
+                .windows(2)
+                .map(|w| w[1] / w[0] - 1.0)
+                .collect();
+            let mean = rets.iter().sum::<f64>() / rets.len() as f64;
+            let var =
+                rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rets.len() as f64;
+            if var > 0.0 {
+                mean / var.sqrt() * (252_f64).sqrt()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
 
-    DataFrame::new(vec![ts_series, eq_series]).unwrap()
-}
+        self.equity_curve.push((ts, eq, sharpe));
+    }
+
+    pub fn result(&self) -> &[(chrono::DateTime<chrono::Utc>, f64, f64)] {
+        &self.equity_curve
+    }
 }

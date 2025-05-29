@@ -1,34 +1,17 @@
-use polars::prelude::*;
 use chrono::{DateTime, Utc};
-use anyhow::Result;
-use std::fs::File;
+use serde::Deserialize;
+use std::{error::Error, fs::File};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Tick {
+    #[serde(rename = "ts")]
     pub ts: DateTime<Utc>,
     pub price: f64,
     pub volume: f64,
 }
 
-pub fn load_ticks(path: &str) -> Result<Vec<Tick>> {
+pub fn load_ticks(path: &str) -> Result<Vec<Tick>, Box<dyn Error>> {
     let file = File::open(path)?;
-let df = CsvReader::new(file)
-    .has_header(true)
-    .with_try_parse_dates(true)
-    .finish()?;
-
-
-    let ts_ca = df.column("timestamp")?.datetime()?;
-    let price = df.column("price")?.f64()?;
-    let vol   = df.column("volume")?.f64()?;
-
-    let ticks = (0..df.height())
-        .map(|i| Tick {
-            ts:  DateTime::<Utc>::from(ts_ca.get(i).unwrap()),
-            price: price.get(i).unwrap(),
-            volume: vol.get(i).unwrap(),
-        })
-        .collect();
-
-    Ok(ticks)
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_reader(file);
+    rdr.deserialize().collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }

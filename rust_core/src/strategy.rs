@@ -1,6 +1,6 @@
 use crate::data::Tick;
-use std::collections::VecDeque;
 use crate::events::{Event, SignalEvent};
+use std::collections::VecDeque;
 
 pub struct SmaCross {
     fast: usize,
@@ -24,32 +24,36 @@ impl SmaCross {
     }
 
     pub fn on_tick(&mut self, tick: &Tick) -> Option<Event> {
-        // --- push price ---
         self.prices.push_back(tick.price);
         if self.prices.len() > self.slow {
             let removed = self.prices.pop_front().unwrap();
-            if self.prices.len() >= self.fast { self.sum_fast -= removed; }
+            if self.prices.len() >= self.fast {
+                self.sum_fast -= removed;
+            }
             self.sum_slow -= removed;
         }
-        // --- update sums ---
-        if self.prices.len() >= self.fast { self.sum_fast += tick.price; }
+        if self.prices.len() >= self.fast {
+            self.sum_fast += tick.price;
+        }
         self.sum_slow += tick.price;
 
-        // wait until we have enough history
-        if self.prices.len() < self.slow { return None; }
+        if self.prices.len() < self.slow {
+            return None;
+        }
 
         let sma_fast = self.sum_fast / self.fast as f64;
         let sma_slow = self.sum_slow / self.slow as f64;
 
-        // crossover logic
-        if sma_fast > sma_slow && !self.in_market {
-            self.in_market = true;
-            return Some(Event::Signal(SignalEvent { ts: tick.ts, long: true }));
+        match (sma_fast > sma_slow, self.in_market) {
+            (true, false) => {
+                self.in_market = true;
+                Some(Event::Signal(SignalEvent { ts: tick.ts, long: true }))
+            }
+            (false, true) => {
+                self.in_market = false;
+                Some(Event::Signal(SignalEvent { ts: tick.ts, long: false }))
+            }
+            _ => None,
         }
-        if sma_fast < sma_slow && self.in_market {
-            self.in_market = false;
-            return Some(Event::Signal(SignalEvent { ts: tick.ts, long: false }));
-        }
-        None
     }
 }
